@@ -1,0 +1,40 @@
+<html>
+<head></head>
+<body>
+    <script type="text/javascript">
+        var sock = null;
+        var wsuri = "ws://localhost:5069/dice";
+        window.onload = function() {
+            console.log("onload");
+            sock = new WebSocket(wsuri);
+            sock.onopen = function() {
+                console.log("connected to " + wsuri);
+            }
+            sock.onclose = function(e) {
+                console.log("connection closed (" + e.code + ")");
+            }
+            sock.onmessage = function(e) {
+                var messagePlaceholder = document.getElementById('message');
+                var message = messagePlaceholder.cloneNode(true);
+                message.textContent = e.data;
+                var messageLog = document.getElementById('messageLog');
+                messageLog.appendChild(message);
+            }
+        };
+
+        function send() {
+            var msg = document.getElementById('playerName').value;
+            sock.send("Player: " + msg + " rolled: ");
+        };
+    </script>
+    <h1>Ultra mega Dice roller 69 420</h1>
+    <form>
+        <p>
+            Player name: <input id="playerName" type="text" value="Kentabekas">
+        </p>
+    </form>
+    <button onclick="send();">Roll dices!</button>
+    <div id="messageLog" style="margin-top: 30px;"></div>
+    <div id="message" style="margin-top: 5px;"></div>
+</body>
+</html>
