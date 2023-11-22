@@ -1,139 +1,177 @@
 package main
 
 import (
-	"flag"
+	"encoding/json"
 	"fmt"
-	"log"
-	"math/rand"
+	"net"
 	"net/http"
-	"time"
+	"os"
 
-	"github.com/gin-gonic/gin"
-	"golang.org/x/net/websocket"
+	"github.com/gorilla/websocket"
+	uuid "github.com/satori/go.uuid"
 )
 
-type hub struct {
-	clients          map[string]*websocket.Conn
-	addClientChan    chan *websocket.Conn
-	removeClientChan chan *websocket.Conn
-	broadcastChan    chan string
-	rand             *rand.Rand
-	dice             []int
+type ClientManager struct {
+	clients    map[*Client]bool
+	broadcast  chan []byte
+	register   chan *Client
+	unregister chan *Client
 }
 
-var (
-	port = flag.String("port", "5069", "port used for ws connection")
-)
-
-func main() {
-	flag.Parse()
-	log.Fatal(server(*port))
+type Client struct {
+	id     string
+	socket *websocket.Conn
+	send   chan []byte
 }
 
-func server(port string) error {
-	h := newHub()
-	router := gin.Default()
-	router.LoadHTMLGlob("templates/*.html")
-	router.GET("/", homePage)
-	router.GET("/favicon.ico", doNothing)
-	router.GET("/dice", func(c *gin.Context) {
-		handler := websocket.Handler(func(ws *websocket.Conn) {
-			webSocketHandler(ws, h)
-		})
-		handler.ServeHTTP(c.Writer, c.Request)
-	})
-	return router.Run("localhost:" + port)
+type Message struct {
+	Sender    string `json:"sender,omitempty"`
+	Recipient string `json:"recipient,omitempty"`
+	Content   string `json:content,omitempty`
+	ServerIP  string `json:serverIp,omitempty`
+	SenderIP  string `json:senderIp,omitempty`
 }
 
-func newHub() *hub {
-	return &hub{
-		clients:          make(map[string]*websocket.Conn),
-		addClientChan:    make(chan *websocket.Conn),
-		removeClientChan: make(chan *websocket.Conn),
-		broadcastChan:    make(chan string),
-		rand:             rand.New(rand.NewSource(time.Now().UnixNano())),
-		dice:             []int{1, 2, 3, 4, 5, 6},
-	}
+var manager = ClientManager{
+	broadcast:  make(chan []byte),
+	register:   make(chan *Client),
+	unregister: make(chan *Client),
+	clients:    make(map[*Client]bool),
 }
 
-func homePage(c *gin.Context) {
-	c.HTML(http.StatusOK, "index.html", nil)
-}
-
-func doNothing(c *gin.Context) {
-}
-
-func webSocketHandler(ws *websocket.Conn, h *hub) {
-	go h.run()
-	h.addClientChan <- ws
-	for {
-		var m string
-		err := websocket.Message.Receive(ws, &m)
-		if err != nil {
-			h.broadcastChan <- err.Error()
-			h.removeClient(ws)
-			return
-		}
-
-		h.broadcastChan <- m
-	}
-}
-
-func (h *hub) run() {
+func (manager *ClientManager) start() {
 	for {
 		select {
-		case conn := <-h.addClientChan:
-			h.addClient(conn)
-		case conn := <-h.removeClientChan:
-			h.removeClient(conn)
-		case m := <-h.broadcastChan:
-			h.broadcastDiceRollMessage(m)
+		case conn := <-manager.register:
+			manager.clients[conn] = true
+			jm, _ := json.Marshal(&Message{Content: "A new socket has connected.", ServerIP: LocalIp(), SenderIP: conn.socket.RemoteAddr().String()})
+			manager.send(jm, conn)
+		case conn := <-manager.unregister:
+			if _, ok := manager.clients[conn]; ok {
+				close(conn.send)
+				delete(manager.clients, conn)
+				jm, _ := json.Marshal(&Message{Content: "A socket has disconnected.", ServerIP: LocalIp(), SenderIP: conn.socket.RemoteAddr().String()})
+				manager.send(jm, conn)
+			}
+		case message := <-manager.broadcast:
+			for conn := range manager.clients {
+				select {
+				case conn.send <- message:
+				default:
+					close(conn.send)
+					delete(manager.clients, conn)
+				}
+			}
 		}
 	}
 }
 
-func (h *hub) addClient(conn *websocket.Conn) {
-	var m string
-	err := websocket.Message.Receive(conn, &m)
+func (manager *ClientManager) send(message []byte, ignore *Client) {
+	for client := range manager.clients {
+		if client != ignore {
+			client.send <- message
+		}
+	}
+}
+
+func (c *Client) read() {
+	defer func() {
+		manager.unregister <- c
+		_ = c.socket.Close()
+	}()
+
+	for {
+		_, message, err := c.socket.ReadMessage()
+		if err != nil {
+			fmt.Printf("read error, err: %v \n", err)
+			manager.unregister <- c
+			_ = c.socket.Close()
+			break
+		}
+
+		jm, _ := json.Marshal(&Message{Sender: c.id, Content: string(message), ServerIP: LocalIp(), SenderIP: c.socket.RemoteAddr().String()})
+		manager.broadcast <- jm
+	}
+}
+
+func (c *Client) write() {
+	defer func() {
+		_ = c.socket.Close()
+	}()
+
+	for {
+		select {
+		case message, ok := <-c.send:
+			if !ok {
+				var err = c.socket.WriteMessage(websocket.CloseMessage, []byte{})
+				fmt.Printf("write error: %v \n", err)
+				return
+			}
+
+			var err = c.socket.WriteMessage(websocket.TextMessage, message)
+			if err != nil {
+				fmt.Printf("send err: %v \n", err)
+			}
+		}
+	}
+}
+
+func main() {
+	fmt.Println("Starting application...")
+	go manager.start()
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		filename := "./templates/index.html"
+		body, err := os.ReadFile(filename)
+		if err != nil {
+			w.Write([]byte(err.Error()))
+		}
+
+		w.Write(body)
+	})
+	http.HandleFunc("/ws", wsHandler)
+	http.HandleFunc("/health", healthHandler)
+	http.HandleFunc("/favicon.ico", doNothing)
+	fmt.Println("dice roller start.....")
+	_ = http.ListenAndServe("0.0.0.0:5069", nil)
+}
+
+var upgrader = websocket.Upgrader{
+	ReadBufferSize:  1024 * 1024 * 1024,
+	WriteBufferSize: 1024 * 1024 * 1024,
+	CheckOrigin:     func(r *http.Request) bool { return true },
+}
+
+func wsHandler(res http.ResponseWriter, req *http.Request) {
+	conn, err := upgrader.Upgrade(res, req, nil)
 	if err != nil {
+		fmt.Printf("error during upgrade: %v", err)
+		http.NotFound(res, req)
 		return
 	}
 
-	h.clients[m] = conn
-	var r = fmt.Sprintf("Player: %s, connected", m)
-	h.broadcastMessage(r)
+	client := &Client{id: uuid.Must(uuid.NewV4(), nil).String(), socket: conn, send: make(chan []byte)}
+	manager.register <- client
+	go client.write()
+	go client.read()
 }
 
-func (h *hub) removeClient(conn *websocket.Conn) {
-	delete(h.clients, conn.LocalAddr().String())
+func healthHandler(res http.ResponseWriter, _ *http.Request) {
+	_, _ = res.Write([]byte("ok"))
 }
 
-func (h *hub) broadcastMessage(m string) {
-	for _, conn := range h.clients {
-		err := websocket.Message.Send(conn, m)
-		if err != nil {
-			fmt.Println("Error broadcasting message: ", err)
-			return
+func LocalIp() string {
+	address, _ := net.InterfaceAddrs()
+	var ip = "localhost"
+	for _, address := range address {
+		if ipAddress, ok := address.(*net.IPNet); ok && !ipAddress.IP.IsLoopback() {
+			if ipAddress.IP.To4() != nil {
+				ip = ipAddress.IP.String()
+			}
 		}
 	}
+
+	return ip
 }
 
-func (h *hub) broadcastDiceRollMessage(m string) {
-	ct := time.Now()
-	ctf := ct.Format("2006-01-02 15:04:05")
-	d1 := h.rollDice()
-	d2 := h.rollDice()
-	res := d1 + d2
-	fr := fmt.Sprintf("[%v] %v %v + %v = %v", ctf, m, d1, d2, res)
-	for _, conn := range h.clients {
-		err := websocket.Message.Send(conn, fr)
-		if err != nil {
-			fmt.Println("Error broadcasting message: ", err)
-			return
-		}
-	}
-}
-
-func (h *hub) rollDice() int {
-	return h.dice[h.rand.Intn(len(h.dice))]
+func doNothing(res http.ResponseWriter, req *http.Request) {
 }

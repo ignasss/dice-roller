@@ -2,34 +2,29 @@
 <head></head>
 <body>
     <script type="text/javascript">
-        var sock = null;
-        var wsuri = "ws://localhost:5069/dice";
-        window.onload = function() {
-            console.log("onload");
-            sock = new WebSocket(wsuri);
-            sock.onopen = function() {
-                console.log("connected to " + wsuri);
-            }
-            sock.onclose = function(e) {
-                console.log("connection closed (" + e.code + ")");
-            }
-            sock.onmessage = function(e) {
-                var messagePlaceholder = document.getElementById('message');
-                var message = messagePlaceholder.cloneNode(true);
-                message.textContent = e.data;
-                var messageLog = document.getElementById('messageLog');
-                messageLog.appendChild(message);
-            }
-        };
+        var ws = new WebSocket("ws://localhost:5069/ws");
+        ws.onopen = function() {
+            console.log("connected to server");
+        }
+        ws.onclose = function(e) {
+            console.log("connection closed (" + e.code + ")");
+        }
+        ws.onmessage = function(e) {
+            var messagePlaceholder = document.getElementById('message');
+            var message = messagePlaceholder.cloneNode(true);
+            message.textContent = e.data;
+            var messageLog = document.getElementById('messageLog');
+            messageLog.appendChild(message);
+        }
 
         function send() {
             var msg = document.getElementById('playerName').value;
-            sock.send("Player: " + msg + " rolled: ");
+            ws.send("Player: " + msg + " rolled: ");
         };
 
         function connect() {
             var msg = document.getElementById('playerName').value;
-            sock.send(msg);
+            ws.send(msg);
         };
     </script>
     <h1>Ultra mega Dice roller 69 420</h1>
