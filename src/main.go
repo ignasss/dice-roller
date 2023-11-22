@@ -87,13 +87,21 @@ func (h *hub) run() {
 		case conn := <-h.removeClientChan:
 			h.removeClient(conn)
 		case m := <-h.broadcastChan:
-			h.broadcastMessage(m)
+			h.broadcastDiceRollMessage(m)
 		}
 	}
 }
 
 func (h *hub) addClient(conn *websocket.Conn) {
-	h.clients[conn.RemoteAddr().String()] = conn
+	var m string
+	err := websocket.Message.Receive(conn, &m)
+	if err != nil {
+		return
+	}
+
+	h.clients[m] = conn
+	var r = fmt.Sprintf("Player: %s, connected", m)
+	h.broadcastMessage(r)
 }
 
 func (h *hub) removeClient(conn *websocket.Conn) {
@@ -101,10 +109,22 @@ func (h *hub) removeClient(conn *websocket.Conn) {
 }
 
 func (h *hub) broadcastMessage(m string) {
+	for _, conn := range h.clients {
+		err := websocket.Message.Send(conn, m)
+		if err != nil {
+			fmt.Println("Error broadcasting message: ", err)
+			return
+		}
+	}
+}
+
+func (h *hub) broadcastDiceRollMessage(m string) {
+	ct := time.Now()
+	ctf := ct.Format("2006-01-02 15:04:05")
 	d1 := h.rollDice()
 	d2 := h.rollDice()
 	res := d1 + d2
-	fr := fmt.Sprintf("%v %v + %v = %v", m, d1, d2, res)
+	fr := fmt.Sprintf("[%v] %v %v + %v = %v", ctf, m, d1, d2, res)
 	for _, conn := range h.clients {
 		err := websocket.Message.Send(conn, fr)
 		if err != nil {

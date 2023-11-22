@@ -26,6 +26,11 @@
             var msg = document.getElementById('playerName').value;
             sock.send("Player: " + msg + " rolled: ");
         };
+
+        function connect() {
+            var msg = document.getElementById('playerName').value;
+            sock.send(msg);
+        };
     </script>
     <h1>Ultra mega Dice roller 69 420</h1>
     <form>
@@ -33,6 +38,7 @@
             Player name: <input id="playerName" type="text" value="Kentabekas">
         </p>
     </form>
+    <button onclick="connect();">Connect</button>
     <button onclick="send();">Roll dices!</button>
     <div id="messageLog" style="margin-top: 30px;"></div>
     <div id="message" style="margin-top: 5px;"></div>
